@@ -25,24 +25,22 @@ import Tuple
 type alias Options =
     { initializeX : Int -> Float
     , initializeY : Int -> Float
-    , vertPadding : Float
+    , verticalPadding : Float
+    , horizontalPadding : Float
     , nodeWidth : Float
-    , minX : Float
-    , maxX : Float
-    , minY : Float
-    , maxY : Float
+    , svgWidth : Int
+    , svgHeight : Int
     , iterations : Int}
 
 defaults : Options
 defaults = { initializeX = (\x -> toFloat x * 50 )
            , initializeY = (\y -> toFloat y * 50 )
-           , vertPadding = 20
+           , verticalPadding = 20
+           , horizontalPadding = 20
            , nodeWidth = 25
-           , minX = 0
-           , maxX = 200
-           , minY = 0
-           , maxY = 200
-           , iterations = 4 }
+           , svgWidth = 800
+           , svgHeight = 800
+           , iterations = 5 }
 
 -----------
 -- TYPES --
@@ -201,7 +199,7 @@ resolveOverlaps opts column =
                                        let
                                            newY = max node.y prevBound
                                        in
-                                           ( newY + node.throughput + opts.vertPadding
+                                           ( newY + node.throughput + opts.verticalPadding
                                            , IntDict.insert ctx.node.id {node | y = newY} nodeDict ))
 
         pushUp : Float -> NodeContext a -> ProcessorState a Float
@@ -211,13 +209,12 @@ resolveOverlaps opts column =
                                    Nothing -> (prevBound,nodeDict)
                                    Just node ->
                                        let
-                                           newY = min node.y (prevBound - node.throughput - opts.vertPadding)
+                                           newY = min node.y (prevBound - node.throughput - opts.verticalPadding)
                                        in
                                            ( newY
                                            , IntDict.insert ctx.node.id {node | y = newY} nodeDict ))
     in
         State.foldlM pushDown 0 column
-            |> State.andThen (\_ -> State.foldrM (flip pushUp) opts.maxY column )
             |> State.andThen (\_ -> State.state column)
 
 relaxNodes : Options
@@ -330,6 +327,28 @@ generateDiagram opts inputs =
 -- RENDERING --
 ---------------
 
+computeViewBox : Options -> List (Node a) -> String
+computeViewBox opts nodes =
+    let
+        bounds {x,y,throughput} = ( x - opts.horizontalPadding
+                                  , y - opts.verticalPadding
+                                  , x + opts.nodeWidth + opts.horizontalPadding
+                                  , y + throughput + opts.verticalPadding )
+
+        mergeBounds (minX1, minY1, maxX1, maxY1) (minX2, minY2, maxX2, maxY2) =
+            ( min minX1 minX2
+            , min minY1 minY2
+            , max maxX1 maxX2
+            , max maxY1 maxY2 )
+    in
+        case nodes of
+            [] -> "0 0 0 0"
+            node::rest -> List.foldl (bounds >> mergeBounds) (bounds node) rest
+                          |> (\(minX,minY,maxX,maxY) -> [minX,minY,maxX-minX,maxY-minY])
+                          |> List.map toString
+                          |> String.join " "
+
+
 render : Options -> Diagram a -> Html msg
 render opts {nodes, edges} =
     let
@@ -379,11 +398,9 @@ render opts {nodes, edges} =
                     []
     in
         Svg.svg
-            [ Attr.width "800"
-            , Attr.height "800"
-            , Attr.viewBox <| String.join " " [ toString opts.minX
-                                              , toString opts.minY
-                                              , toString <| opts.maxX - opts.minX
-                                              , toString <| opts.maxY - opts.minY ]]
+            [ Attr.width <| toString opts.svgWidth
+            , Attr.height <| toString opts.svgHeight
+            , Attr.viewBox <| computeViewBox opts nodes
+            , Attr.preserveAspectRatio "meet midXmidY"]
             [ Svg.g [] (List.map renderNode nodes)
             , Svg.g [] (List.map renderEdge edges) ]
