@@ -35,16 +35,16 @@ type alias Options =
     , iterations : Int}
 
 defaults : Options
-defaults = { initializeX = toFloat
-           , initializeY = toFloat
+defaults = { initializeX = (\x -> toFloat x * 50 )
+           , initializeY = (\y -> toFloat y * 50 )
            , edgeElasticity = identity
-           , vertPadding = 1
-           , nodeWidth = 30
+           , vertPadding = 20
+           , nodeWidth = 25
            , minX = 0
-           , maxX = 100
+           , maxX = 200
            , minY = 0
-           , maxY = 100
-           , iterations = 1 }
+           , maxY = 200
+           , iterations = 4 }
 
 -----------
 -- TYPES --
@@ -82,6 +82,13 @@ type alias ProcessorState a = State (IntDict Node) a
 ------------------------
 -- DIAGRAM GENERATION --
 ------------------------
+
+generateLayout : Inputs -> Layout
+generateLayout inputs =
+    Graph.fromNodesAndEdges inputs.nodes inputs.flows
+        |> Graph.checkAcyclic
+        |> Result.map Graph.heightLevels
+        |> Result.withDefault [] -- TODO error handling
 
 decorateNodes : List (Graph.Node String) -> IntDict Node
 decorateNodes = List.map (\{id, label} -> (id, { label = label
@@ -132,11 +139,16 @@ initializeNodes opts =
     traverseLayout (\colIx rowIx ctx ->
                         IntDict.update ctx.node.id
                         (Maybe.map (\node -> { node
-                                                 | x = opts.initializeX rowIx
-                                                 , y = opts.initializeY colIx
-                                                 , throughput = ctx.incoming
-                                                 |> IntDict.values
-                                                 |> List.sum })))
+                                                 | y = opts.initializeX rowIx
+                                                 , x = opts.initializeY colIx
+                                                 , throughput =
+                                                   max
+                                                   ( ctx.incoming
+                                                   |> IntDict.values
+                                                   |> List.sum )
+                                                   (ctx.outgoing
+                                                   |> IntDict.values
+                                                   |> List.sum )})))
 
 sortColumn : LayoutColumn -> ProcessorState LayoutColumn
 sortColumn column =
@@ -209,7 +221,6 @@ resolveOverlaps opts column =
             |> State.andThen (\_ -> State.foldrM (flip pushUp) opts.maxY column )
             |> State.andThen (\_ -> State.state column)
 
-
 relaxNodes : Options
            -> Layout
            -> ProcessorState Layout
@@ -240,8 +251,8 @@ relaxNodes opts =
     in
         go 0
 
-generateDiagram : Options -> Inputs -> Layout -> ProcessorState Diagram
-generateDiagram opts inputs layout =
+outputDiagram : Options -> Inputs -> Layout -> ProcessorState Diagram
+outputDiagram opts inputs layout =
     State.embed (\nodeDict ->
                       { nodes = IntDict.values nodeDict
                       , edges =
@@ -306,6 +317,16 @@ generateDiagram opts inputs layout =
                               State.finalState Dict.empty (traverseLayout updateEdges layout)
                                   |> Dict.values})
 
+
+generateDiagram : Options -> Inputs -> Diagram
+generateDiagram opts inputs =
+    generateLayout inputs
+        |> initializeNodes opts
+        |> State.andThen (relaxNodes opts)
+        |> State.andThen (outputDiagram opts inputs)
+        |> State.finalValue (decorateNodes inputs.nodes)
+
+
 ---------------
 -- RENDERING --
 ---------------
@@ -328,8 +349,8 @@ render opts {nodes, edges} =
         renderEdge : Edge -> Svg msg
         renderEdge {startX, startY, endX, endY, throughput} =
             let
-                startControlX = toString <| 2 * startX + endX / 3
-                endControlX = toString <| startX + 2 * endX / 3
+                startControlX = toString <| (2 * startX + endX) / 3
+                endControlX = toString <| (startX + 2 * endX) / 3
                 startLowerY = toString <| startY + throughput
                 endLowerY = toString <| endY + throughput
                 startX_ = toString startX
@@ -345,15 +366,15 @@ render opts {nodes, edges} =
                                                 , "C", startControlX, startY_
                                                 , endControlX, endY_
                                                 , endX_, endY_
-                                                , "M", endX_, endLowerY
+                                                , "L", endX_, endLowerY
                                                 , "C", endControlX, endLowerY
                                                 , startControlX, startLowerY
                                                 , startX_, startLowerY ]]
                     []
     in
         Svg.svg
-            [ Attr.width "500"
-            , Attr.height "500"
+            [ Attr.width "800"
+            , Attr.height "800"
             , Attr.viewBox <| String.join " " [ toString opts.minX
                                               , toString opts.minY
                                               , toString <| opts.maxX - opts.minX
