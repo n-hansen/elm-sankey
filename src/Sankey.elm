@@ -8,10 +8,14 @@ module Sankey exposing (..)
 
 import Dict exposing (Dict)
 import Graph exposing (Graph, AcyclicGraph)
+import Html exposing (Html)
 import IntDict exposing (IntDict)
 import List
 import Maybe exposing (withDefault)
 import State exposing (State)
+import String
+import Svg exposing (Svg)
+import Svg.Attributes as Attr
 import Tuple
 
 ------------
@@ -301,3 +305,58 @@ generateDiagram opts inputs layout =
                           in
                               State.finalState Dict.empty (traverseLayout updateEdges layout)
                                   |> Dict.values})
+
+---------------
+-- RENDERING --
+---------------
+
+render : Options -> Diagram -> Html msg
+render opts {nodes, edges} =
+    let
+        renderNode : Node -> Svg msg
+        renderNode {label, x, y, throughput} =
+            Svg.rect
+                [ Attr.x <| toString x
+                , Attr.y <| toString y
+                , Attr.width <| toString opts.nodeWidth
+                , Attr.height <| toString throughput
+                , Attr.fill "blue"
+                , Attr.stroke "black"
+                , Attr.strokeWidth "2" ]
+                [ Svg.text_ [] [ Svg.text label ]]
+
+        renderEdge : Edge -> Svg msg
+        renderEdge {startX, startY, endX, endY, throughput} =
+            let
+                startControlX = toString <| 2 * startX + endX / 3
+                endControlX = toString <| startX + 2 * endX / 3
+                startLowerY = toString <| startY + throughput
+                endLowerY = toString <| endY + throughput
+                startX_ = toString startX
+                startY_ = toString startY
+                endX_ = toString endX
+                endY_ = toString endY
+            in
+                Svg.path
+                    [ Attr.fill "orange"
+                    , Attr.stroke "black"
+                    , Attr.strokeWidth "1"
+                    , Attr.d <| String.join " " [ "M", startX_, startY_
+                                                , "C", startControlX, startY_
+                                                , endControlX, endY_
+                                                , endX_, endY_
+                                                , "M", endX_, endLowerY
+                                                , "C", endControlX, endLowerY
+                                                , startControlX, startLowerY
+                                                , startX_, startLowerY ]]
+                    []
+    in
+        Svg.svg
+            [ Attr.width "500"
+            , Attr.height "500"
+            , Attr.viewBox <| String.join " " [ toString opts.minX
+                                              , toString opts.minY
+                                              , toString <| opts.maxX - opts.minX
+                                              , toString <| opts.maxY - opts.minY ]]
+            [ Svg.g [] (List.map renderNode nodes)
+            , Svg.g [] (List.map renderEdge edges) ]
