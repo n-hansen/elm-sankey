@@ -13,15 +13,35 @@ import Maybe exposing (withDefault)
 import State exposing (State)
 import Tuple
 
+------------
+-- CONFIG --
+------------
+
 type alias Options =
     { initializeX : Int -> Float
     , initializeY : Int -> Float
-    , edgeElasticity : Float -> Float }
+    , edgeElasticity : Float -> Float
+    , vertPadding : Float
+    , minX : Float
+    , maxX : Float
+    , minY : Float
+    , maxY : Float
+    , iterations : Int}
 
 defaults : Options
 defaults = { initializeX = toFloat
            , initializeY = toFloat
-           , edgeElasticity = identity }
+           , edgeElasticity = identity
+           , vertPadding = 1
+           , minX = 0
+           , maxX = 100
+           , minY = 0
+           , maxY = 100
+           , iterations = 1 }
+
+-----------
+-- TYPES --
+-----------
 
 type alias Node a =
     { label : a
@@ -45,13 +65,6 @@ type alias Inputs a =
     { nodes : List (Graph.Node a)
     , flows : List (Graph.Edge Float) }
 
-decorateNodes : List (Graph.Node a) -> IntDict (Node a)
-decorateNodes = List.map (\{id, label} -> (id, { label = label
-                                               , throughput = 0
-                                               , x = 0
-                                               , y = 0 }))
-                >> IntDict.fromList
-
 type alias NodeContext a = Graph.NodeContext a Float
 
 type alias LayoutColumn a = List (NodeContext a)
@@ -60,15 +73,26 @@ type alias Layout a = List (LayoutColumn a)
 
 type alias ProcessorState a b = State (IntDict (Node a)) b
 
+---------------
+-- FUNCTIONS --
+---------------
+
+decorateNodes : List (Graph.Node a) -> IntDict (Node a)
+decorateNodes = List.map (\{id, label} -> (id, { label = label
+                                               , throughput = 0
+                                               , x = 0
+                                               , y = 0 }))
+                >> IntDict.fromList
+
 traverseColumn : (Int -> Int -> NodeContext a -> IntDict (Node a) -> IntDict (Node a))
                -> Int
                -> LayoutColumn a
                -> ProcessorState a (LayoutColumn a)
-traverseColumn operation col column =
+traverseColumn operation colIx column =
     column
-        |> List.indexedMap (\row ctx -> (col, row, ctx))
+        |> List.indexedMap (\rowIx ctx -> (colIx, rowIx, ctx))
         |> State.traverse
-           (\(col, row, ctx) -> State.modify (operation col row ctx)
+           (\(colIx, rowIx, ctx) -> State.modify (operation colIx rowIx ctx)
            |> State.andThen (\_ -> State.state ctx))
 
 traverseColumns : ((Int, LayoutColumn a) -> ProcessorState a (LayoutColumn a))
@@ -103,11 +127,11 @@ traverseLayout operation layout =
 
 initializeNodes : Options -> Layout a -> ProcessorState a (Layout a)
 initializeNodes opts =
-    traverseLayout (\col row ctx ->
+    traverseLayout (\colIx rowIx ctx ->
                         IntDict.update ctx.node.id
                         (Maybe.map (\node -> { node
-                                                 | x = opts.initializeX row
-                                                 , y = opts.initializeY col
+                                                 | x = opts.initializeX rowIx
+                                                 , y = opts.initializeY colIx
                                                  , throughput = ctx.incoming
                                                  |> IntDict.values
                                                  |> List.sum })))
@@ -124,14 +148,87 @@ weightedAverage vals =
     in
         go 0 0 vals
 
-pullEdges : Options -> Int -> Int -> NodeContext a -> IntDict (Node a) -> IntDict (Node a)
-pullEdges opts _ _ ctx nodeDict =
-    IntDict.update ctx.node.id
-        (Maybe.map (\node -> { node
-                                 | y = IntDict.toList ctx.incoming
-                                 |> List.append (IntDict.toList ctx.outgoing)
-                                 |> List.map
-                                   ( Tuple.mapFirst (\id -> IntDict.get id nodeDict |> Maybe.map .y |> withDefault 0)
-                                   >> Tuple.mapSecond opts.edgeElasticity )
-                                 |> weightedAverage}))
-        nodeDict
+pullEdges : Options
+          -> (Int, LayoutColumn a)
+          -> ProcessorState a (LayoutColumn a)
+pullEdges opts (colIx, column) =
+    let
+        handleNode : Int -> Int -> NodeContext a -> IntDict (Node a) -> IntDict (Node a)
+        handleNode _ _ ctx nodeDict =
+            IntDict.update ctx.node.id
+                (Maybe.map (\node -> { node
+                                         | y = IntDict.toList ctx.incoming
+                                                   |> List.append (IntDict.toList ctx.outgoing)
+                                                   |> List.map (Tuple.mapFirst (\id ->
+                                                                                    IntDict.get id nodeDict
+                                                                                        |> Maybe.map .y
+                                                                                        |> withDefault 0)
+                                                                    >> Tuple.mapSecond opts.edgeElasticity )
+                                                   |> weightedAverage}))
+                nodeDict
+    in
+        traverseColumn handleNode colIx column
+
+resolveOverlaps : Options -> LayoutColumn a -> ProcessorState a (LayoutColumn a)
+resolveOverlaps opts column =
+    let
+        pushDown : Float -> NodeContext a -> ProcessorState a Float
+        pushDown prevBound ctx =
+            State.advance (\nodeDict ->
+                               case IntDict.get ctx.node.id nodeDict of
+                                   Nothing -> (prevBound,nodeDict)
+                                   Just node ->
+                                       let
+                                           newY = max node.y prevBound
+                                       in
+                                           ( newY + node.throughput + opts.vertPadding
+                                           , IntDict.insert ctx.node.id {node | y = newY} nodeDict ))
+
+        pushUp : Float -> NodeContext a -> ProcessorState a Float
+        pushUp prevBound ctx =
+            State.advance (\nodeDict ->
+                               case IntDict.get ctx.node.id nodeDict of
+                                   Nothing -> (prevBound,nodeDict)
+                                   Just node ->
+                                       let
+                                           newY = min node.y (prevBound - node.throughput - opts.vertPadding)
+                                       in
+                                           ( newY
+                                           , IntDict.insert ctx.node.id {node | y = newY} nodeDict ))
+
+
+    in
+        State.foldlM pushDown 0 column
+            |> State.andThen (\_ -> State.foldrM (flip pushUp) opts.maxY column )
+            |> State.andThen (\_ -> State.state column)
+
+
+relaxNodes : Options
+           -> Layout a
+           -> ProcessorState a (Layout a)
+relaxNodes opts =
+    let
+        relaxColumn : (Int, LayoutColumn a) -> ProcessorState a (LayoutColumn a)
+        relaxColumn col =
+            pullEdges opts col
+                |> State.andThen (\col -> sortColumn col)
+                |> State.andThen (\col -> resolveOverlaps opts col)
+
+        relaxLayout : Layout a -> ProcessorState a (Layout a)
+        relaxLayout layout =
+            traverseColumns relaxColumn layout
+                |> State.map List.reverse
+                |> State.andThen (\l -> traverseColumns relaxColumn l)
+                |> State.map List.reverse
+
+        go : Int -> Layout a -> ProcessorState a (Layout a)
+        go i layout =
+            if i >= opts.iterations
+            then
+                State.state layout
+            else
+                relaxLayout layout
+                    |> State.andThen (\l -> go (i+1) l)
+
+    in
+        go 0
