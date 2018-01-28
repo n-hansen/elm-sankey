@@ -96,15 +96,9 @@ nodeCenter node = node.y + node.throughput / 2
 
 weightedAverage : List (Float,Float) -> Float
 weightedAverage vals =
-    let
-        go numerator denominator vals =
-            case vals of
-                [] -> if denominator /= 0
-                      then numerator / denominator
-                      else 0
-                (value,weight)::rest -> go (numerator+weight*value) (denominator+weight) rest
-    in
-        go 0 0 vals
+    case List.foldl (\(value,weight) (numerator,denominator) -> (numerator+weight*value,denominator+weight)) (0,0) vals of
+        (_, 0) -> 0
+        (numerator,denominator) -> numerator / denominator
 
 ------------------------
 -- DIAGRAM GENERATION --
