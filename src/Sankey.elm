@@ -48,8 +48,8 @@ defaults = { initializeX = (\x -> toFloat x * 50 )
 -- TYPES --
 -----------
 
-type alias Node =
-    { label : String
+type alias Node a =
+    { label : a
     , x : Float
     , y : Float
     , throughput : Float }
@@ -61,37 +61,37 @@ type alias Edge =
     , endY : Float
     , throughput : Float }
 
-type alias Diagram =
-    { nodes : List Node
+type alias Diagram a =
+    { nodes : List (Node a)
     , edges : List Edge }
 
-type alias Inputs =
-    { nodes : List (Graph.Node String)
+type alias Inputs a =
+    { nodes : List (Graph.Node a)
     , flows : List (Graph.Edge Float) }
 
-type alias NodeContext = Graph.NodeContext String Float
+type alias NodeContext a = Graph.NodeContext a Float
 
-type alias LayoutColumn = List NodeContext
+type alias LayoutColumn a = List (NodeContext a)
 
-type alias Layout = List LayoutColumn
+type alias Layout a = List (LayoutColumn a)
 
-type alias ProcessorState a = State (IntDict Node) a
+type alias ProcessorState a b = State (IntDict (Node a)) b
 
 -----------------------
 -- UTILITY FUNCTIONS --
 -----------------------
 
-fromContext : (Node -> x)
+fromContext : (Node a -> x)
             -> x
-            -> IntDict Node
-            -> NodeContext
+            -> IntDict (Node a)
+            -> NodeContext a
             -> x
 fromContext f default nodeDict ctx =
     IntDict.get ctx.node.id nodeDict
         |> Maybe.map f
         |> withDefault default
 
-nodeCenter : Node -> Float
+nodeCenter : Node a -> Float
 nodeCenter node = node.y + node.throughput / 2
 
 weightedAverage : List (Float,Float) -> Float
@@ -104,24 +104,24 @@ weightedAverage vals =
 -- DIAGRAM GENERATION --
 ------------------------
 
-generateLayout : Inputs -> Layout
+generateLayout : Inputs a -> Layout a
 generateLayout inputs =
     Graph.fromNodesAndEdges inputs.nodes inputs.flows
         |> Graph.checkAcyclic
         |> Result.map Graph.heightLevels
         |> Result.withDefault [] -- TODO error handling
 
-decorateNodes : List (Graph.Node String) -> IntDict Node
+decorateNodes : List (Graph.Node a) -> IntDict (Node a)
 decorateNodes = List.map (\{id, label} -> (id, { label = label
                                                , throughput = 0
                                                , x = 0
                                                , y = 0 }))
                 >> IntDict.fromList
 
-traverseColumn : (Int -> Int -> NodeContext -> s -> s)
+traverseColumn : (Int -> Int -> NodeContext a -> s -> s)
                -> Int
-               -> LayoutColumn
-               -> State s LayoutColumn
+               -> LayoutColumn a
+               -> State s (LayoutColumn a)
 traverseColumn operation colIx column =
     column
         |> List.indexedMap (\rowIx ctx -> (colIx, rowIx, ctx))
@@ -129,23 +129,23 @@ traverseColumn operation colIx column =
            (\(colIx, rowIx, ctx) -> State.modify (operation colIx rowIx ctx)
            |> State.andThen (\_ -> State.state ctx))
 
-traverseColumns : ((Int, LayoutColumn) -> State s LayoutColumn)
-                -> Layout
-                -> State s Layout
+traverseColumns : ((Int, LayoutColumn a) -> State s (LayoutColumn a))
+                -> Layout a
+                -> State s (Layout a)
 traverseColumns operation layout =
     layout
         |> List.indexedMap (,)
         |> State.traverse operation
 
-traverseLayout : (Int -> Int -> NodeContext -> s -> s)
-               -> Layout
-               -> State s Layout
+traverseLayout : (Int -> Int -> NodeContext a -> s -> s)
+               -> Layout a
+               -> State s (Layout a)
 traverseLayout operation layout =
     traverseColumns
         (\(i,column) -> traverseColumn operation i column)
         layout
 
-initializeNodes : Options -> Layout -> ProcessorState Layout
+initializeNodes : Options -> Layout a -> ProcessorState a (Layout a)
 initializeNodes opts =
     traverseLayout (\colIx rowIx ctx ->
                         IntDict.update ctx.node.id
@@ -161,7 +161,7 @@ initializeNodes opts =
                                                    |> IntDict.values
                                                    |> List.sum )})))
 
-sortColumn : LayoutColumn -> ProcessorState LayoutColumn
+sortColumn : LayoutColumn a -> ProcessorState a (LayoutColumn a)
 sortColumn column =
     State.get |> State.andThen ( \nodeDict ->
                                      column
@@ -169,11 +169,11 @@ sortColumn column =
                                          |> State.state )
 
 pullEdges : Options
-          -> (Int, LayoutColumn)
-          -> ProcessorState LayoutColumn
+          -> (Int, LayoutColumn a)
+          -> ProcessorState a (LayoutColumn a)
 pullEdges opts (colIx, column) =
     let
-        handleNode : Int -> Int -> NodeContext -> IntDict Node -> IntDict Node
+        handleNode : Int -> Int -> NodeContext a -> IntDict (Node a) -> IntDict (Node a)
         handleNode _ _ ctx nodeDict =
             IntDict.update ctx.node.id
                 (Maybe.map (\node -> { node
@@ -189,10 +189,10 @@ pullEdges opts (colIx, column) =
     in
         traverseColumn handleNode colIx column
 
-resolveOverlaps : Options -> LayoutColumn -> ProcessorState LayoutColumn
+resolveOverlaps : Options -> LayoutColumn a -> ProcessorState a (LayoutColumn a)
 resolveOverlaps opts column =
     let
-        pushDown : Float -> NodeContext -> ProcessorState Float
+        pushDown : Float -> NodeContext a -> ProcessorState a Float
         pushDown prevBound ctx =
             State.advance (\nodeDict ->
                                case IntDict.get ctx.node.id nodeDict of
@@ -204,7 +204,7 @@ resolveOverlaps opts column =
                                            ( newY + node.throughput + opts.vertPadding
                                            , IntDict.insert ctx.node.id {node | y = newY} nodeDict ))
 
-        pushUp : Float -> NodeContext -> ProcessorState Float
+        pushUp : Float -> NodeContext a -> ProcessorState a Float
         pushUp prevBound ctx =
             State.advance (\nodeDict ->
                                case IntDict.get ctx.node.id nodeDict of
@@ -221,24 +221,24 @@ resolveOverlaps opts column =
             |> State.andThen (\_ -> State.state column)
 
 relaxNodes : Options
-           -> Layout
-           -> ProcessorState Layout
+           -> Layout a
+           -> ProcessorState a (Layout a)
 relaxNodes opts =
     let
-        relaxColumn : (Int, LayoutColumn) -> ProcessorState LayoutColumn
+        relaxColumn : (Int, LayoutColumn a) -> ProcessorState a (LayoutColumn a)
         relaxColumn col =
             pullEdges opts col
                 |> State.andThen (\col -> sortColumn col)
                 |> State.andThen (\col -> resolveOverlaps opts col)
 
-        relaxLayout : Layout -> ProcessorState Layout
+        relaxLayout : Layout a -> ProcessorState a (Layout a)
         relaxLayout layout =
             traverseColumns relaxColumn layout
                 |> State.map List.reverse
                 |> State.andThen (\l -> traverseColumns relaxColumn l)
                 |> State.map List.reverse
 
-        go : Int -> Layout -> ProcessorState Layout
+        go : Int -> Layout a -> ProcessorState a (Layout a)
         go i layout =
             if i >= opts.iterations
             then
@@ -250,7 +250,7 @@ relaxNodes opts =
     in
         go 0
 
-outputDiagram : Options -> Inputs -> Layout -> ProcessorState Diagram
+outputDiagram : Options -> Inputs a -> Layout a -> ProcessorState a (Diagram a)
 outputDiagram opts inputs layout =
     State.embed (\nodeDict ->
                       { nodes = IntDict.values nodeDict
@@ -258,10 +258,10 @@ outputDiagram opts inputs layout =
                           let
                               edgeKey x y = (max x y, min x y)
 
-                              updateEdges : Int -> Int -> NodeContext -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
+                              updateEdges : Int -> Int -> NodeContext a -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
                               updateEdges _ _ ctx = placeIncomingEdges ctx >> placeOutgoingEdges ctx
 
-                              placeIncomingEdges : NodeContext -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
+                              placeIncomingEdges : NodeContext a -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
                               placeIncomingEdges ctx edgeDict =
                                   let
                                       x = fromContext .x 0 nodeDict ctx
@@ -287,7 +287,7 @@ outputDiagram opts inputs layout =
                                              (edgeDict, fromContext .y 0 nodeDict ctx)
                                           |> Tuple.first
 
-                              placeOutgoingEdges : NodeContext -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
+                              placeOutgoingEdges : NodeContext a -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
                               placeOutgoingEdges ctx edgeDict =
                                   let
                                       x = fromContext .x 0 nodeDict ctx + opts.nodeWidth
@@ -317,7 +317,7 @@ outputDiagram opts inputs layout =
                                   |> Dict.values})
 
 
-generateDiagram : Options -> Inputs -> Diagram
+generateDiagram : Options -> Inputs a -> Diagram a
 generateDiagram opts inputs =
     generateLayout inputs
         |> initializeNodes opts
@@ -330,10 +330,10 @@ generateDiagram opts inputs =
 -- RENDERING --
 ---------------
 
-render : Options -> Diagram -> Html msg
+render : Options -> Diagram a -> Html msg
 render opts {nodes, edges} =
     let
-        renderNode : Node -> Svg msg
+        renderNode : Node a -> Svg msg
         renderNode {label, x, y, throughput} =
             Svg.g []
                 [ Svg.rect
@@ -350,7 +350,7 @@ render opts {nodes, edges} =
                     , Attr.y << toString <| y + throughput / 2
                     , Attr.fill "white"
                     , Attr.fontSize "9"]
-                      [ Svg.text label ]]
+                      [ Svg.text <| toString label ]]
 
         renderEdge : Edge -> Svg msg
         renderEdge {startX, startY, endX, endY, throughput} =
