@@ -46,8 +46,8 @@ defaults = { initializeX = toFloat
 -- TYPES --
 -----------
 
-type alias Node a =
-    { label : a
+type alias Node =
+    { label : String
     , x : Float
     , y : Float
     , throughput : Float }
@@ -59,37 +59,37 @@ type alias Edge =
     , endY : Float
     , throughput : Float }
 
-type alias Diagram a =
-    { nodes : List (Node a)
+type alias Diagram =
+    { nodes : List Node
     , edges : List Edge }
 
-type alias Inputs a =
-    { nodes : List (Graph.Node a)
+type alias Inputs =
+    { nodes : List (Graph.Node String)
     , flows : List (Graph.Edge Float) }
 
-type alias NodeContext a = Graph.NodeContext a Float
+type alias NodeContext = Graph.NodeContext String Float
 
-type alias LayoutColumn a = List (NodeContext a)
+type alias LayoutColumn = List NodeContext
 
-type alias Layout a = List (LayoutColumn a)
+type alias Layout = List LayoutColumn
 
-type alias ProcessorState a b = State (IntDict (Node a)) b
+type alias ProcessorState a = State (IntDict Node) a
 
----------------
--- FUNCTIONS --
----------------
+------------------------
+-- DIAGRAM GENERATION --
+------------------------
 
-decorateNodes : List (Graph.Node a) -> IntDict (Node a)
+decorateNodes : List (Graph.Node String) -> IntDict Node
 decorateNodes = List.map (\{id, label} -> (id, { label = label
                                                , throughput = 0
                                                , x = 0
                                                , y = 0 }))
                 >> IntDict.fromList
 
-traverseColumn : (Int -> Int -> NodeContext a -> s -> s)
+traverseColumn : (Int -> Int -> NodeContext -> s -> s)
                -> Int
-               -> LayoutColumn a
-               -> State s (LayoutColumn a)
+               -> LayoutColumn
+               -> State s LayoutColumn
 traverseColumn operation colIx column =
     column
         |> List.indexedMap (\rowIx ctx -> (colIx, rowIx, ctx))
@@ -97,33 +97,33 @@ traverseColumn operation colIx column =
            (\(colIx, rowIx, ctx) -> State.modify (operation colIx rowIx ctx)
            |> State.andThen (\_ -> State.state ctx))
 
-traverseColumns : ((Int, LayoutColumn a) -> State s (LayoutColumn a))
-                -> Layout a
-                -> State s (Layout a)
+traverseColumns : ((Int, LayoutColumn) -> State s LayoutColumn)
+                -> Layout
+                -> State s Layout
 traverseColumns operation layout =
     layout
         |> List.indexedMap (,)
         |> State.traverse operation
 
-traverseLayout : (Int -> Int -> NodeContext a -> s -> s)
-               -> Layout a
-               -> State s (Layout a)
+traverseLayout : (Int -> Int -> NodeContext -> s -> s)
+               -> Layout
+               -> State s Layout
 traverseLayout operation layout =
     traverseColumns
         (\(i,column) -> traverseColumn operation i column)
         layout
 
-fromContext : (Node a -> x)
+fromContext : (Node -> x)
             -> x
-            -> IntDict (Node a)
-            -> NodeContext a
+            -> IntDict Node
+            -> NodeContext
             -> x
 fromContext f default nodeDict ctx =
     IntDict.get ctx.node.id nodeDict
         |> Maybe.map f
         |> withDefault default
 
-initializeNodes : Options -> Layout a -> ProcessorState a (Layout a)
+initializeNodes : Options -> Layout -> ProcessorState Layout
 initializeNodes opts =
     traverseLayout (\colIx rowIx ctx ->
                         IntDict.update ctx.node.id
@@ -134,7 +134,7 @@ initializeNodes opts =
                                                  |> IntDict.values
                                                  |> List.sum })))
 
-sortColumn : LayoutColumn a -> ProcessorState a (LayoutColumn a)
+sortColumn : LayoutColumn -> ProcessorState LayoutColumn
 sortColumn column =
     State.get |> State.andThen ( \nodeDict ->
                                      column
@@ -154,11 +154,11 @@ weightedAverage vals =
         go 0 0 vals
 
 pullEdges : Options
-          -> (Int, LayoutColumn a)
-          -> ProcessorState a (LayoutColumn a)
+          -> (Int, LayoutColumn)
+          -> ProcessorState LayoutColumn
 pullEdges opts (colIx, column) =
     let
-        handleNode : Int -> Int -> NodeContext a -> IntDict (Node a) -> IntDict (Node a)
+        handleNode : Int -> Int -> NodeContext -> IntDict Node -> IntDict Node
         handleNode _ _ ctx nodeDict =
             IntDict.update ctx.node.id
                 (Maybe.map (\node -> { node
@@ -174,10 +174,10 @@ pullEdges opts (colIx, column) =
     in
         traverseColumn handleNode colIx column
 
-resolveOverlaps : Options -> LayoutColumn a -> ProcessorState a (LayoutColumn a)
+resolveOverlaps : Options -> LayoutColumn -> ProcessorState LayoutColumn
 resolveOverlaps opts column =
     let
-        pushDown : Float -> NodeContext a -> ProcessorState a Float
+        pushDown : Float -> NodeContext -> ProcessorState Float
         pushDown prevBound ctx =
             State.advance (\nodeDict ->
                                case IntDict.get ctx.node.id nodeDict of
@@ -189,7 +189,7 @@ resolveOverlaps opts column =
                                            ( newY + node.throughput + opts.vertPadding
                                            , IntDict.insert ctx.node.id {node | y = newY} nodeDict ))
 
-        pushUp : Float -> NodeContext a -> ProcessorState a Float
+        pushUp : Float -> NodeContext -> ProcessorState Float
         pushUp prevBound ctx =
             State.advance (\nodeDict ->
                                case IntDict.get ctx.node.id nodeDict of
@@ -207,24 +207,24 @@ resolveOverlaps opts column =
 
 
 relaxNodes : Options
-           -> Layout a
-           -> ProcessorState a (Layout a)
+           -> Layout
+           -> ProcessorState Layout
 relaxNodes opts =
     let
-        relaxColumn : (Int, LayoutColumn a) -> ProcessorState a (LayoutColumn a)
+        relaxColumn : (Int, LayoutColumn) -> ProcessorState LayoutColumn
         relaxColumn col =
             pullEdges opts col
                 |> State.andThen (\col -> sortColumn col)
                 |> State.andThen (\col -> resolveOverlaps opts col)
 
-        relaxLayout : Layout a -> ProcessorState a (Layout a)
+        relaxLayout : Layout -> ProcessorState Layout
         relaxLayout layout =
             traverseColumns relaxColumn layout
                 |> State.map List.reverse
                 |> State.andThen (\l -> traverseColumns relaxColumn l)
                 |> State.map List.reverse
 
-        go : Int -> Layout a -> ProcessorState a (Layout a)
+        go : Int -> Layout -> ProcessorState Layout
         go i layout =
             if i >= opts.iterations
             then
@@ -236,7 +236,7 @@ relaxNodes opts =
     in
         go 0
 
-generateDiagram : Options -> Inputs a -> Layout a -> ProcessorState a (Diagram a)
+generateDiagram : Options -> Inputs -> Layout -> ProcessorState Diagram
 generateDiagram opts inputs layout =
     State.embed (\nodeDict ->
                       { nodes = IntDict.values nodeDict
@@ -244,10 +244,10 @@ generateDiagram opts inputs layout =
                           let
                               edgeKey x y = (max x y, min x y)
 
-                              updateEdges : Int -> Int -> NodeContext a -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
+                              updateEdges : Int -> Int -> NodeContext -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
                               updateEdges _ _ ctx = placeIncomingEdges ctx >> placeOutgoingEdges ctx
 
-                              placeIncomingEdges : NodeContext a -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
+                              placeIncomingEdges : NodeContext -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
                               placeIncomingEdges ctx edgeDict =
                                   let
                                       x = fromContext .x 0 nodeDict ctx
@@ -273,7 +273,7 @@ generateDiagram opts inputs layout =
                                              (edgeDict, fromContext .y 0 nodeDict ctx)
                                           |> Tuple.first
 
-                              placeOutgoingEdges : NodeContext a -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
+                              placeOutgoingEdges : NodeContext -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
                               placeOutgoingEdges ctx edgeDict =
                                   let
                                       x = fromContext .x 0 nodeDict ctx + opts.nodeWidth
