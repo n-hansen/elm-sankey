@@ -6,6 +6,7 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY 
 You should have received a copy of the GNU General Public License along with this program. If not, see http://www.gnu.org/licenses/ -}
 module Sankey exposing (..)
 
+import Dict exposing (Dict)
 import Graph exposing (Graph, AcyclicGraph)
 import IntDict exposing (IntDict)
 import List
@@ -22,6 +23,7 @@ type alias Options =
     , initializeY : Int -> Float
     , edgeElasticity : Float -> Float
     , vertPadding : Float
+    , nodeWidth : Float
     , minX : Float
     , maxX : Float
     , minY : Float
@@ -33,6 +35,7 @@ defaults = { initializeX = toFloat
            , initializeY = toFloat
            , edgeElasticity = identity
            , vertPadding = 1
+           , nodeWidth = 30
            , minX = 0
            , maxX = 100
            , minY = 0
@@ -50,9 +53,8 @@ type alias Node a =
     , throughput : Float }
 
 type alias Edge =
-    { label : String
-    , startX : Float
-    , startX : Float
+    { startX : Float
+    , startY : Float
     , endX : Float
     , endY : Float
     , throughput : Float }
@@ -84,10 +86,10 @@ decorateNodes = List.map (\{id, label} -> (id, { label = label
                                                , y = 0 }))
                 >> IntDict.fromList
 
-traverseColumn : (Int -> Int -> NodeContext a -> IntDict (Node a) -> IntDict (Node a))
+traverseColumn : (Int -> Int -> NodeContext a -> s -> s)
                -> Int
                -> LayoutColumn a
-               -> ProcessorState a (LayoutColumn a)
+               -> State s (LayoutColumn a)
 traverseColumn operation colIx column =
     column
         |> List.indexedMap (\rowIx ctx -> (colIx, rowIx, ctx))
@@ -95,35 +97,31 @@ traverseColumn operation colIx column =
            (\(colIx, rowIx, ctx) -> State.modify (operation colIx rowIx ctx)
            |> State.andThen (\_ -> State.state ctx))
 
-traverseColumns : ((Int, LayoutColumn a) -> ProcessorState a (LayoutColumn a))
+traverseColumns : ((Int, LayoutColumn a) -> State s (LayoutColumn a))
                 -> Layout a
-                -> ProcessorState a (Layout a)
+                -> State s (Layout a)
 traverseColumns operation layout =
     layout
         |> List.indexedMap (,)
         |> State.traverse operation
 
-
-sortColumn : LayoutColumn a -> ProcessorState a (LayoutColumn a)
-sortColumn column =
-    State.get |> State.andThen ( \nodeDict ->
-                                     column
-                                         |> List.sortBy (\ctx ->
-                                                             IntDict.get (ctx.node.id) nodeDict
-                                                                 |> Maybe.map .y
-                                                                 |> withDefault 0 )
-                                         |> State.state )
-
-traverseLayout : (Int -> Int -> NodeContext a -> IntDict (Node a) -> IntDict (Node a))
+traverseLayout : (Int -> Int -> NodeContext a -> s -> s)
                -> Layout a
-               -> ProcessorState a (Layout a)
+               -> State s (Layout a)
 traverseLayout operation layout =
     traverseColumns
-        (\(i,column) ->
-             column
-                 |> sortColumn
-                 |> State.andThen (traverseColumn operation i))
+        (\(i,column) -> traverseColumn operation i column)
         layout
+
+fromContext : (Node a -> x)
+            -> x
+            -> IntDict (Node a)
+            -> NodeContext a
+            -> x
+fromContext f default nodeDict ctx =
+    IntDict.get ctx.node.id nodeDict
+        |> Maybe.map f
+        |> withDefault default
 
 initializeNodes : Options -> Layout a -> ProcessorState a (Layout a)
 initializeNodes opts =
@@ -135,6 +133,13 @@ initializeNodes opts =
                                                  , throughput = ctx.incoming
                                                  |> IntDict.values
                                                  |> List.sum })))
+
+sortColumn : LayoutColumn a -> ProcessorState a (LayoutColumn a)
+sortColumn column =
+    State.get |> State.andThen ( \nodeDict ->
+                                     column
+                                         |> List.sortBy (fromContext .y 0 nodeDict)
+                                         |> State.state )
 
 weightedAverage : List (Float,Float) -> Float
 weightedAverage vals =
@@ -195,8 +200,6 @@ resolveOverlaps opts column =
                                        in
                                            ( newY
                                            , IntDict.insert ctx.node.id {node | y = newY} nodeDict ))
-
-
     in
         State.foldlM pushDown 0 column
             |> State.andThen (\_ -> State.foldrM (flip pushUp) opts.maxY column )
@@ -232,3 +235,69 @@ relaxNodes opts =
 
     in
         go 0
+
+generateDiagram : Options -> Inputs a -> Layout a -> ProcessorState a (Diagram a)
+generateDiagram opts inputs layout =
+    State.embed (\nodeDict ->
+                      { nodes = IntDict.values nodeDict
+                      , edges =
+                          let
+                              edgeKey x y = (max x y, min x y)
+
+                              updateEdges : Int -> Int -> NodeContext a -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
+                              updateEdges _ _ ctx = placeIncomingEdges ctx >> placeOutgoingEdges ctx
+
+                              placeIncomingEdges : NodeContext a -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
+                              placeIncomingEdges ctx edgeDict =
+                                  let
+                                      x = fromContext .x 0 nodeDict ctx
+                                  in
+                                      IntDict.toList ctx.incoming
+                                          |> List.sortBy (\(id,_) ->
+                                                              IntDict.get id nodeDict
+                                                                  |> Maybe.map .y
+                                                                  |> withDefault 0)
+                                          |> List.foldl (\(id,flow) (edgeDict,y) ->
+                                                             ( Dict.update (edgeKey id ctx.node.id)
+                                                                   (\e -> case e of
+                                                                              Just edge -> Just {edge
+                                                                                                    | endY = y
+                                                                                                    , endX = x}
+                                                                              Nothing -> Just { endY = y
+                                                                                              , endX = x
+                                                                                              , throughput = flow
+                                                                                              , startX = 0
+                                                                                              , startY = 0})
+                                                                   edgeDict
+                                                             , y + flow))
+                                             (edgeDict, fromContext .y 0 nodeDict ctx)
+                                          |> Tuple.first
+
+                              placeOutgoingEdges : NodeContext a -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
+                              placeOutgoingEdges ctx edgeDict =
+                                  let
+                                      x = fromContext .x 0 nodeDict ctx + opts.nodeWidth
+                                  in
+                                      IntDict.toList ctx.outgoing
+                                          |> List.sortBy (\(id,_) ->
+                                                              IntDict.get id nodeDict
+                                                                  |> Maybe.map .y
+                                                                  |> withDefault 0)
+                                          |> List.foldl (\(id,flow) (edgeDict,y) ->
+                                                             ( Dict.update (edgeKey id ctx.node.id)
+                                                                   (\e -> case e of
+                                                                              Just edge -> Just {edge
+                                                                                                    | startY = y
+                                                                                                    , startX = x}
+                                                                              Nothing -> Just { startY = y
+                                                                                              , startX = x
+                                                                                              , throughput = flow
+                                                                                              , endX = 0
+                                                                                              , endY = 0})
+                                                                   edgeDict
+                                                             , y + flow))
+                                             (edgeDict, fromContext .y 0 nodeDict ctx)
+                                          |> Tuple.first
+                          in
+                              State.finalState Dict.empty (traverseLayout updateEdges layout)
+                                  |> Dict.values})
