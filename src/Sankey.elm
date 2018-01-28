@@ -25,7 +25,6 @@ import Tuple
 type alias Options =
     { initializeX : Int -> Float
     , initializeY : Int -> Float
-    , edgeElasticity : Float -> Float
     , vertPadding : Float
     , nodeWidth : Float
     , minX : Float
@@ -37,7 +36,6 @@ type alias Options =
 defaults : Options
 defaults = { initializeX = (\x -> toFloat x * 50 )
            , initializeY = (\y -> toFloat y * 50 )
-           , edgeElasticity = identity
            , vertPadding = 20
            , nodeWidth = 25
            , minX = 0
@@ -78,6 +76,35 @@ type alias LayoutColumn = List NodeContext
 type alias Layout = List LayoutColumn
 
 type alias ProcessorState a = State (IntDict Node) a
+
+-----------------------
+-- UTILITY FUNCTIONS --
+-----------------------
+
+fromContext : (Node -> x)
+            -> x
+            -> IntDict Node
+            -> NodeContext
+            -> x
+fromContext f default nodeDict ctx =
+    IntDict.get ctx.node.id nodeDict
+        |> Maybe.map f
+        |> withDefault default
+
+nodeCenter : Node -> Float
+nodeCenter node = node.y + node.throughput / 2
+
+weightedAverage : List (Float,Float) -> Float
+weightedAverage vals =
+    let
+        go numerator denominator vals =
+            case vals of
+                [] -> if denominator /= 0
+                      then numerator / denominator
+                      else 0
+                (value,weight)::rest -> go (numerator+weight*value) (denominator+weight) rest
+    in
+        go 0 0 vals
 
 ------------------------
 -- DIAGRAM GENERATION --
@@ -124,16 +151,6 @@ traverseLayout operation layout =
         (\(i,column) -> traverseColumn operation i column)
         layout
 
-fromContext : (Node -> x)
-            -> x
-            -> IntDict Node
-            -> NodeContext
-            -> x
-fromContext f default nodeDict ctx =
-    IntDict.get ctx.node.id nodeDict
-        |> Maybe.map f
-        |> withDefault default
-
 initializeNodes : Options -> Layout -> ProcessorState Layout
 initializeNodes opts =
     traverseLayout (\colIx rowIx ctx ->
@@ -157,18 +174,6 @@ sortColumn column =
                                          |> List.sortBy (fromContext .y 0 nodeDict)
                                          |> State.state )
 
-weightedAverage : List (Float,Float) -> Float
-weightedAverage vals =
-    let
-        go numerator denominator vals =
-            case vals of
-                [] -> if denominator /= 0
-                      then numerator / denominator
-                      else 0
-                (weight,value)::rest -> go (numerator+weight*value) (denominator+weight) rest
-    in
-        go 0 0 vals
-
 pullEdges : Options
           -> (Int, LayoutColumn)
           -> ProcessorState LayoutColumn
@@ -182,10 +187,10 @@ pullEdges opts (colIx, column) =
                                                    |> List.append (IntDict.toList ctx.outgoing)
                                                    |> List.map (Tuple.mapFirst (\id ->
                                                                                     IntDict.get id nodeDict
-                                                                                        |> Maybe.map .y
-                                                                                        |> withDefault 0)
-                                                                    >> Tuple.mapSecond opts.edgeElasticity )
-                                                   |> weightedAverage}))
+                                                                                        |> Maybe.map nodeCenter
+                                                                                        |> withDefault 0))
+                                                   |> weightedAverage
+                                                   |> (\y -> y - node.throughput / 2)}))
                 nodeDict
     in
         traverseColumn handleNode colIx column
@@ -246,7 +251,7 @@ relaxNodes opts =
                 State.state layout
             else
                 relaxLayout layout
-                    |> State.andThen (\l -> go (i+1) l)
+                    |> State.andThen (go (i+1))
 
     in
         go 0
@@ -336,15 +341,22 @@ render opts {nodes, edges} =
     let
         renderNode : Node -> Svg msg
         renderNode {label, x, y, throughput} =
-            Svg.rect
-                [ Attr.x <| toString x
-                , Attr.y <| toString y
-                , Attr.width <| toString opts.nodeWidth
-                , Attr.height <| toString throughput
-                , Attr.fill "blue"
-                , Attr.stroke "black"
-                , Attr.strokeWidth "2" ]
-                [ Svg.text_ [] [ Svg.text label ]]
+            Svg.g []
+                [ Svg.rect
+                      [ Attr.x <| toString x
+                      , Attr.y <| toString y
+                      , Attr.width <| toString opts.nodeWidth
+                      , Attr.height <| toString throughput
+                      , Attr.fill "blue"
+                      , Attr.stroke "black"
+                      , Attr.strokeWidth "1" ]
+                      []
+                , Svg.text_
+                    [ Attr.x <| toString x
+                    , Attr.y << toString <| y + throughput / 2
+                    , Attr.fill "white"
+                    , Attr.fontSize "9"]
+                      [ Svg.text label ]]
 
         renderEdge : Edge -> Svg msg
         renderEdge {startX, startY, endX, endY, throughput} =
