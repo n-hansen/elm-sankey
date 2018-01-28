@@ -30,17 +30,21 @@ type alias Options =
     , nodeWidth : Float
     , svgWidth : Int
     , svgHeight : Int
+    , forwardInertia : Float
+    , backwardInertia : Float
     , iterations : Int}
 
 defaults : Options
 defaults = { initializeX = (\x -> toFloat x * 50 )
            , initializeY = (\y -> toFloat y * 50 )
-           , verticalPadding = 20
-           , horizontalPadding = 20
+           , verticalPadding = 3
+           , horizontalPadding = 3
            , nodeWidth = 25
            , svgWidth = 800
            , svgHeight = 800
-           , iterations = 5 }
+           , forwardInertia = 0.6
+           , backwardInertia = 0.7
+           , iterations = 8 }
 
 -----------
 -- TYPES --
@@ -166,10 +170,10 @@ sortColumn column =
                                          |> List.sortBy (fromContext .y 0 nodeDict)
                                          |> State.state )
 
-pullEdges : Options
+pullEdges : Float
           -> (Int, LayoutColumn a)
           -> ProcessorState a (LayoutColumn a)
-pullEdges opts (colIx, column) =
+pullEdges inertia (colIx, column) =
     let
         handleNode : Int -> Int -> NodeContext a -> IntDict (Node a) -> IntDict (Node a)
         handleNode _ _ ctx nodeDict =
@@ -182,7 +186,8 @@ pullEdges opts (colIx, column) =
                                                                                         |> Maybe.map nodeCenter
                                                                                         |> withDefault 0))
                                                    |> weightedAverage
-                                                   |> (\y -> y - node.throughput / 2)}))
+                                         |> (\y -> (1-inertia) * (y - node.throughput / 2)
+                                                 + inertia * nodeCenter node)}))
                 nodeDict
     in
         traverseColumn handleNode colIx column
@@ -222,17 +227,17 @@ relaxNodes : Options
            -> ProcessorState a (Layout a)
 relaxNodes opts =
     let
-        relaxColumn : (Int, LayoutColumn a) -> ProcessorState a (LayoutColumn a)
-        relaxColumn col =
-            pullEdges opts col
+        relaxColumn : Float -> (Int, LayoutColumn a) -> ProcessorState a (LayoutColumn a)
+        relaxColumn inertia col =
+            pullEdges inertia col
                 |> State.andThen (\col -> sortColumn col)
                 |> State.andThen (\col -> resolveOverlaps opts col)
 
         relaxLayout : Layout a -> ProcessorState a (Layout a)
         relaxLayout layout =
-            traverseColumns relaxColumn layout
+            traverseColumns (relaxColumn opts.forwardInertia) layout
                 |> State.map List.reverse
-                |> State.andThen (\l -> traverseColumns relaxColumn l)
+                |> State.andThen (\l -> traverseColumns (relaxColumn opts.backwardInertia) l)
                 |> State.map List.reverse
 
         go : Int -> Layout a -> ProcessorState a (Layout a)
