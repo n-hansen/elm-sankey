@@ -411,6 +411,6 @@ render opts {nodes, edges} =
                                                                       , minY - opts.verticalPadding
                                                                       , maxX-minX + 2 * opts.horizontalPadding
                                                                       , maxY-minY + 2 * opts.verticalPadding ]
-            , Attr.preserveAspectRatio "meet midXmidY"]
+            , Attr.preserveAspectRatio "xMidYMid meet"]
             [ Svg.g [] (List.map renderEdge edges)
             , Svg.g [] (List.map renderNode nodes)]
