@@ -1,7 +1,7 @@
 {
     "version": "1.0.0",
-    "summary": "",
-    "repository": "https://github.com/user/project.git",
+    "summary": "Generate Sankey flow diagrams",
+    "repository": "https://github.com/n-hansen/elm-sankey.git",
     "license": "GPL-3.0+",
     "source-directories": [
         "src"
