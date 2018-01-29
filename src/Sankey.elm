@@ -22,7 +22,7 @@ import Tuple
 -- CONFIG --
 ------------
 
-type alias Options =
+type alias Options a =
     { initializeX : Int -> Float
     , initializeY : Int -> Float
     , verticalPadding : Float
@@ -32,19 +32,21 @@ type alias Options =
     , svgHeight : Int
     , forwardInertia : Float
     , backwardInertia : Float
-    , iterations : Int}
+    , iterations : Int
+    , labelToString : a -> String }
 
-defaults : Options
+defaults : Options a
 defaults = { initializeX = (\x -> toFloat x * 50 )
            , initializeY = (\y -> toFloat y * 50 )
            , verticalPadding = 3
-           , horizontalPadding = 3
-           , nodeWidth = 25
+           , horizontalPadding = 1
+           , nodeWidth = 5
            , svgWidth = 800
            , svgHeight = 800
            , forwardInertia = 0.6
            , backwardInertia = 0.7
-           , iterations = 8 }
+           , iterations = 8
+           , labelToString = toString }
 
 -----------
 -- TYPES --
@@ -147,7 +149,7 @@ traverseLayout operation layout =
         (\(i,column) -> traverseColumn operation i column)
         layout
 
-initializeNodes : Options -> Layout a -> ProcessorState a (Layout a)
+initializeNodes : Options a -> Layout a -> ProcessorState a (Layout a)
 initializeNodes opts =
     traverseLayout (\colIx rowIx ctx ->
                         IntDict.update ctx.node.id
@@ -192,7 +194,7 @@ pullEdges inertia (colIx, column) =
     in
         traverseColumn handleNode colIx column
 
-resolveOverlaps : Options -> LayoutColumn a -> ProcessorState a (LayoutColumn a)
+resolveOverlaps : Options a -> LayoutColumn a -> ProcessorState a (LayoutColumn a)
 resolveOverlaps opts column =
     let
         pushDown : Float -> NodeContext a -> ProcessorState a Float
@@ -222,7 +224,7 @@ resolveOverlaps opts column =
         State.foldlM pushDown 0 column
             |> State.andThen (\_ -> State.state column)
 
-relaxNodes : Options
+relaxNodes : Options a
            -> Layout a
            -> ProcessorState a (Layout a)
 relaxNodes opts =
@@ -252,7 +254,7 @@ relaxNodes opts =
     in
         go 0
 
-outputDiagram : Options -> Inputs a -> Layout a -> ProcessorState a (Diagram a)
+outputDiagram : Options a -> Inputs a -> Layout a -> ProcessorState a (Diagram a)
 outputDiagram opts inputs layout =
     State.embed (\nodeDict ->
                       { nodes = IntDict.values nodeDict
@@ -319,7 +321,7 @@ outputDiagram opts inputs layout =
                                   |> Dict.values})
 
 
-generateDiagram : Options -> Inputs a -> Diagram a
+generateDiagram : Options a -> Inputs a -> Diagram a
 generateDiagram opts inputs =
     generateLayout inputs
         |> initializeNodes opts
@@ -332,49 +334,50 @@ generateDiagram opts inputs =
 -- RENDERING --
 ---------------
 
-computeViewBox : Options -> List (Node a) -> String
-computeViewBox opts nodes =
-    let
-        bounds {x,y,throughput} = ( x - opts.horizontalPadding
-                                  , y - opts.verticalPadding
-                                  , x + opts.nodeWidth + opts.horizontalPadding
-                                  , y + throughput + opts.verticalPadding )
-
-        mergeBounds (minX1, minY1, maxX1, maxY1) (minX2, minY2, maxX2, maxY2) =
-            ( min minX1 minX2
-            , min minY1 minY2
-            , max maxX1 maxX2
-            , max maxY1 maxY2 )
-    in
-        case nodes of
-            [] -> "0 0 0 0"
-            node::rest -> List.foldl (bounds >> mergeBounds) (bounds node) rest
-                          |> (\(minX,minY,maxX,maxY) -> [minX,minY,maxX-minX,maxY-minY])
-                          |> List.map toString
-                          |> String.join " "
-
-
-render : Options -> Diagram a -> Html msg
+render : Options a -> Diagram a -> Html msg
 render opts {nodes, edges} =
     let
+        nodeBounds {x,y,throughput} = (x, y, x + opts.nodeWidth, y + throughput)
+
+        (minX,minY,maxX,maxY) =
+            case nodes of
+                [] -> (0,0,0,0)
+                node::rest -> List.foldl
+                              (nodeBounds >> (\(minX1, minY1, maxX1, maxY1) (minX2, minY2, maxX2, maxY2) ->
+                                                  ( min minX1 minX2
+                                                  , min minY1 minY2
+                                                  , max maxX1 maxX2
+                                                  , max maxY1 maxY2 )))
+                              (nodeBounds node) rest
+
         renderNode : Node a -> Svg msg
-        renderNode {label, x, y, throughput} =
-            Svg.g []
-                [ Svg.rect
-                      [ Attr.x <| toString x
-                      , Attr.y <| toString y
-                      , Attr.width <| toString opts.nodeWidth
-                      , Attr.height <| toString throughput
-                      , Attr.fill "blue"
-                      , Attr.stroke "black"
-                      , Attr.strokeWidth "1" ]
-                      []
-                , Svg.text_
-                    [ Attr.x <| toString x
-                    , Attr.y << toString <| y + throughput / 2
-                    , Attr.fill "white"
-                    , Attr.fontSize "9"]
-                      [ Svg.text <| toString label ]]
+        renderNode node =
+            let
+                {label, x, y, throughput} = node
+                (nodeMinX,nodeMinY,nodeMaxX,nodeMaxY) = nodeBounds node
+            in
+                Svg.g []
+                    [ Svg.rect
+                          [ Attr.x <| toString x
+                          , Attr.y <| toString y
+                          , Attr.width <| toString opts.nodeWidth
+                          , Attr.height <| toString throughput
+                          , Attr.fill "blue"
+                          , Attr.stroke "black"
+                          , Attr.strokeWidth "1" ]
+                          []
+                    , Svg.text_
+                        ( [ Attr.fontSize "4"
+                          , Attr.fontFamily "Verdana"
+                          , Attr.y << toString <| nodeCenter node ] ++
+                          ( if (x < (minX + maxX)/2)
+                            then
+                                [ Attr.x << toString <| nodeMaxX + opts.horizontalPadding
+                                , Attr.textAnchor "start" ]
+                            else
+                                [ Attr.x << toString <| nodeMinX - opts.horizontalPadding
+                                , Attr.textAnchor "end" ]))
+                        [ Svg.text <| toString label ]]
 
         renderEdge : Edge -> Svg msg
         renderEdge {startX, startY, endX, endY, throughput} =
@@ -389,9 +392,8 @@ render opts {nodes, edges} =
                 endY_ = toString endY
             in
                 Svg.path
-                    [ Attr.fill "orange"
-                    , Attr.stroke "black"
-                    , Attr.strokeWidth "1"
+                    [ Attr.fill "black"
+                    , Attr.opacity "0.30"
                     , Attr.d <| String.join " " [ "M", startX_, startY_
                                                 , "C", startControlX, startY_
                                                 , endControlX, endY_
@@ -405,7 +407,10 @@ render opts {nodes, edges} =
         Svg.svg
             [ Attr.width <| toString opts.svgWidth
             , Attr.height <| toString opts.svgHeight
-            , Attr.viewBox <| computeViewBox opts nodes
+            , Attr.viewBox << String.join " " << List.map toString <| [ minX - opts.horizontalPadding
+                                                                      , minY - opts.verticalPadding
+                                                                      , maxX-minX + 2 * opts.horizontalPadding
+                                                                      , maxY-minY + 2 * opts.verticalPadding ]
             , Attr.preserveAspectRatio "meet midXmidY"]
-            [ Svg.g [] (List.map renderNode nodes)
-            , Svg.g [] (List.map renderEdge edges) ]
+            [ Svg.g [] (List.map renderEdge edges)
+            , Svg.g [] (List.map renderNode nodes)]
