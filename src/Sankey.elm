@@ -8,6 +8,7 @@ module Sankey exposing (..)
 
 import Dict exposing (Dict)
 import Graph exposing (Graph, AcyclicGraph)
+import Hashbow
 import Html exposing (Html)
 import IntDict exposing (IntDict)
 import List
@@ -33,7 +34,9 @@ type alias Options a =
     , forwardInertia : Float
     , backwardInertia : Float
     , iterations : Int
-    , labelToString : a -> String }
+    , labelSize : Int
+    , nodeText : a -> String
+    , nodeColor : a -> String }
 
 defaults : Options a
 defaults = { initializeX = (\x -> toFloat x * 50 )
@@ -46,7 +49,9 @@ defaults = { initializeX = (\x -> toFloat x * 50 )
            , forwardInertia = 0.6
            , backwardInertia = 0.7
            , iterations = 8
-           , labelToString = toString }
+           , labelSize = 4
+           , nodeText = toString
+           , nodeColor = toString >> Hashbow.hashbow }
 
 -----------
 -- TYPES --
@@ -362,12 +367,12 @@ render opts {nodes, edges} =
                           , Attr.y <| toString y
                           , Attr.width <| toString opts.nodeWidth
                           , Attr.height <| toString throughput
-                          , Attr.fill "blue"
+                          , Attr.fill <| opts.nodeColor label
                           , Attr.stroke "black"
                           , Attr.strokeWidth "1" ]
                           []
                     , Svg.text_
-                        ( [ Attr.fontSize "4"
+                        ( [ Attr.fontSize <| toString opts.labelSize
                           , Attr.fontFamily "Verdana"
                           , Attr.y << toString <| nodeCenter node ] ++
                           ( if (x < (minX + maxX)/2)
@@ -377,7 +382,7 @@ render opts {nodes, edges} =
                             else
                                 [ Attr.x << toString <| nodeMinX - opts.horizontalPadding
                                 , Attr.textAnchor "end" ]))
-                        [ Svg.text <| toString label ]]
+                        [ Svg.text <| opts.nodeText label ]]
 
         renderEdge : Edge -> Svg msg
         renderEdge {startX, startY, endX, endY, throughput} =
