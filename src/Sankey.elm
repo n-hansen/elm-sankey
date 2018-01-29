@@ -23,7 +23,7 @@ import Tuple
 -- CONFIG --
 ------------
 
-type alias Options a =
+type alias Options =
     { initializeX : Int -> Float
     , initializeY : Int -> Float
     , verticalPadding : Float
@@ -35,10 +35,13 @@ type alias Options a =
     , backwardInertia : Float
     , iterations : Int
     , labelSize : Int
-    , nodeText : a -> String
-    , nodeColor : a -> String }
+    , nodeLabel : Node -> String
+    , nodeColor : Node -> String
+    , nodeTitle : Node -> String
+    , edgeColor : Edge -> String
+    , edgeTitle : Edge -> String }
 
-defaults : Options a
+defaults : Options
 defaults = { initializeX = (\x -> toFloat x * 50 )
            , initializeY = (\y -> toFloat y * 50 )
            , verticalPadding = 3
@@ -50,28 +53,35 @@ defaults = { initializeX = (\x -> toFloat x * 50 )
            , backwardInertia = 0.7
            , iterations = 8
            , labelSize = 4
-           , nodeText = toString
-           , nodeColor = toString >> Hashbow.hashbow }
+           , nodeLabel = (\_ -> "")
+           , nodeColor = toString >> Hashbow.hashbow
+           , nodeTitle = (\_ -> "")
+           , edgeColor = (\_ -> "black")
+           , edgeTitle = (.throughput >> toString)}
 
 -----------
 -- TYPES --
 -----------
 
-type alias Node a =
-    { label : a
+type alias NodeId = Int
+
+type alias Node =
+    { id : NodeId
     , x : Float
     , y : Float
     , throughput : Float }
 
 type alias Edge =
-    { startX : Float
+    { from : NodeId
+    , to : NodeId
+    , startX : Float
     , startY : Float
     , endX : Float
     , endY : Float
     , throughput : Float }
 
-type alias Diagram a =
-    { nodes : List (Node a)
+type alias Diagram =
+    { nodes : List Node
     , edges : List Edge }
 
 type alias Inputs a =
@@ -84,15 +94,15 @@ type alias LayoutColumn a = List (NodeContext a)
 
 type alias Layout a = List (LayoutColumn a)
 
-type alias ProcessorState a b = State (IntDict (Node a)) b
+type alias ProcessorState a = State (IntDict Node) a
 
 -----------------------
 -- UTILITY FUNCTIONS --
 -----------------------
 
-fromContext : (Node a -> x)
+fromContext : (Node -> x)
             -> x
-            -> IntDict (Node a)
+            -> IntDict Node
             -> NodeContext a
             -> x
 fromContext f default nodeDict ctx =
@@ -100,7 +110,7 @@ fromContext f default nodeDict ctx =
         |> Maybe.map f
         |> withDefault default
 
-nodeCenter : Node a -> Float
+nodeCenter : Node -> Float
 nodeCenter node = node.y + node.throughput / 2
 
 weightedAverage : List (Float,Float) -> Float
@@ -120,8 +130,8 @@ generateLayout inputs =
         |> Result.map Graph.heightLevels
         |> Result.withDefault [] -- TODO error handling
 
-decorateNodes : List (Graph.Node a) -> IntDict (Node a)
-decorateNodes = List.map (\{id, label} -> (id, { label = label
+decorateNodes : List (Graph.Node a) -> IntDict Node
+decorateNodes = List.map (\{id, label} -> (id, { id = id
                                                , throughput = 0
                                                , x = 0
                                                , y = 0 }))
@@ -154,7 +164,7 @@ traverseLayout operation layout =
         (\(i,column) -> traverseColumn operation i column)
         layout
 
-initializeNodes : Options a -> Layout a -> ProcessorState a (Layout a)
+initializeNodes : Options -> Layout a -> ProcessorState (Layout a)
 initializeNodes opts =
     traverseLayout (\colIx rowIx ctx ->
                         IntDict.update ctx.node.id
@@ -170,7 +180,7 @@ initializeNodes opts =
                                                    |> IntDict.values
                                                    |> List.sum )})))
 
-sortColumn : LayoutColumn a -> ProcessorState a (LayoutColumn a)
+sortColumn : LayoutColumn a -> ProcessorState (LayoutColumn a)
 sortColumn column =
     State.get |> State.andThen ( \nodeDict ->
                                      column
@@ -179,10 +189,10 @@ sortColumn column =
 
 pullEdges : Float
           -> (Int, LayoutColumn a)
-          -> ProcessorState a (LayoutColumn a)
+          -> ProcessorState (LayoutColumn a)
 pullEdges inertia (colIx, column) =
     let
-        handleNode : Int -> Int -> NodeContext a -> IntDict (Node a) -> IntDict (Node a)
+        handleNode : Int -> Int -> NodeContext a -> IntDict Node -> IntDict Node
         handleNode _ _ ctx nodeDict =
             IntDict.update ctx.node.id
                 (Maybe.map (\node -> { node
@@ -199,10 +209,10 @@ pullEdges inertia (colIx, column) =
     in
         traverseColumn handleNode colIx column
 
-resolveOverlaps : Options a -> LayoutColumn a -> ProcessorState a (LayoutColumn a)
+resolveOverlaps : Options -> LayoutColumn a -> ProcessorState (LayoutColumn a)
 resolveOverlaps opts column =
     let
-        pushDown : Float -> NodeContext a -> ProcessorState a Float
+        pushDown : Float -> NodeContext a -> ProcessorState Float
         pushDown prevBound ctx =
             State.advance (\nodeDict ->
                                case IntDict.get ctx.node.id nodeDict of
@@ -214,7 +224,7 @@ resolveOverlaps opts column =
                                            ( newY + node.throughput + opts.verticalPadding
                                            , IntDict.insert ctx.node.id {node | y = newY} nodeDict ))
 
-        pushUp : Float -> NodeContext a -> ProcessorState a Float
+        pushUp : Float -> NodeContext a -> ProcessorState Float
         pushUp prevBound ctx =
             State.advance (\nodeDict ->
                                case IntDict.get ctx.node.id nodeDict of
@@ -229,25 +239,25 @@ resolveOverlaps opts column =
         State.foldlM pushDown 0 column
             |> State.andThen (\_ -> State.state column)
 
-relaxNodes : Options a
+relaxNodes : Options
            -> Layout a
-           -> ProcessorState a (Layout a)
+           -> ProcessorState (Layout a)
 relaxNodes opts =
     let
-        relaxColumn : Float -> (Int, LayoutColumn a) -> ProcessorState a (LayoutColumn a)
+        relaxColumn : Float -> (Int, LayoutColumn a) -> ProcessorState (LayoutColumn a)
         relaxColumn inertia col =
             pullEdges inertia col
                 |> State.andThen (\col -> sortColumn col)
                 |> State.andThen (\col -> resolveOverlaps opts col)
 
-        relaxLayout : Layout a -> ProcessorState a (Layout a)
+        relaxLayout : Layout a -> ProcessorState (Layout a)
         relaxLayout layout =
             traverseColumns (relaxColumn opts.forwardInertia) layout
                 |> State.map List.reverse
                 |> State.andThen (\l -> traverseColumns (relaxColumn opts.backwardInertia) l)
                 |> State.map List.reverse
 
-        go : Int -> Layout a -> ProcessorState a (Layout a)
+        go : Int -> Layout a -> ProcessorState (Layout a)
         go i layout =
             if i >= opts.iterations
             then
@@ -259,14 +269,12 @@ relaxNodes opts =
     in
         go 0
 
-outputDiagram : Options a -> Inputs a -> Layout a -> ProcessorState a (Diagram a)
-outputDiagram opts inputs layout =
+outputDiagram : Options -> Layout a -> ProcessorState Diagram
+outputDiagram opts layout =
     State.embed (\nodeDict ->
                       { nodes = IntDict.values nodeDict
                       , edges =
                           let
-                              edgeKey x y = (max x y, min x y)
-
                               updateEdges : Int -> Int -> NodeContext a -> Dict (Int,Int) Edge -> Dict (Int,Int) Edge
                               updateEdges _ _ ctx = placeIncomingEdges ctx >> placeOutgoingEdges ctx
 
@@ -281,12 +289,14 @@ outputDiagram opts inputs layout =
                                                                   |> Maybe.map .y
                                                                   |> withDefault 0)
                                           |> List.foldl (\(id,flow) (edgeDict,y) ->
-                                                             ( Dict.update (edgeKey id ctx.node.id)
+                                                             ( Dict.update (id, ctx.node.id)
                                                                    (\e -> case e of
                                                                               Just edge -> Just {edge
                                                                                                     | endY = y
                                                                                                     , endX = x}
-                                                                              Nothing -> Just { endY = y
+                                                                              Nothing -> Just { from = id
+                                                                                              , to = ctx.node.id
+                                                                                              , endY = y
                                                                                               , endX = x
                                                                                               , throughput = flow
                                                                                               , startX = 0
@@ -307,12 +317,14 @@ outputDiagram opts inputs layout =
                                                                   |> Maybe.map .y
                                                                   |> withDefault 0)
                                           |> List.foldl (\(id,flow) (edgeDict,y) ->
-                                                             ( Dict.update (edgeKey id ctx.node.id)
+                                                             ( Dict.update (ctx.node.id, id)
                                                                    (\e -> case e of
                                                                               Just edge -> Just {edge
                                                                                                     | startY = y
                                                                                                     , startX = x}
-                                                                              Nothing -> Just { startY = y
+                                                                              Nothing -> Just { from = ctx.node.id
+                                                                                              , to = id
+                                                                                              , startY = y
                                                                                               , startX = x
                                                                                               , throughput = flow
                                                                                               , endX = 0
@@ -326,12 +338,12 @@ outputDiagram opts inputs layout =
                                   |> Dict.values})
 
 
-generateDiagram : Options a -> Inputs a -> Diagram a
+generateDiagram : Options -> Inputs a -> Diagram
 generateDiagram opts inputs =
     generateLayout inputs
         |> initializeNodes opts
         |> State.andThen (relaxNodes opts)
-        |> State.andThen (outputDiagram opts inputs)
+        |> State.andThen (outputDiagram opts)
         |> State.finalValue (decorateNodes inputs.nodes)
 
 
@@ -339,7 +351,9 @@ generateDiagram opts inputs =
 -- RENDERING --
 ---------------
 
-render : Options a -> Diagram a -> Html msg
+render : Options
+       -> Diagram
+       -> Html msg
 render opts {nodes, edges} =
     let
         nodeBounds {x,y,throughput} = (x, y, x + opts.nodeWidth, y + throughput)
@@ -355,10 +369,10 @@ render opts {nodes, edges} =
                                                   , max maxY1 maxY2 )))
                               (nodeBounds node) rest
 
-        renderNode : Node a -> Svg msg
+        renderNode : Node -> Svg msg
         renderNode node =
             let
-                {label, x, y, throughput} = node
+                {id, x, y, throughput} = node
                 (nodeMinX,nodeMinY,nodeMaxX,nodeMaxY) = nodeBounds node
             in
                 Svg.g []
@@ -367,10 +381,10 @@ render opts {nodes, edges} =
                           , Attr.y <| toString y
                           , Attr.width <| toString opts.nodeWidth
                           , Attr.height <| toString throughput
-                          , Attr.fill <| opts.nodeColor label
+                          , Attr.fill <| opts.nodeColor node
                           , Attr.stroke "black"
                           , Attr.strokeWidth "1" ]
-                          []
+                          [ Svg.title [] [Svg.text <| opts.nodeTitle node]]
                     , Svg.text_
                         ( [ Attr.fontSize <| toString opts.labelSize
                           , Attr.fontFamily "Verdana"
@@ -382,11 +396,12 @@ render opts {nodes, edges} =
                             else
                                 [ Attr.x << toString <| nodeMinX - opts.horizontalPadding
                                 , Attr.textAnchor "end" ]))
-                        [ Svg.text <| opts.nodeText label ]]
+                        [ Svg.text <| opts.nodeLabel node ]]
 
         renderEdge : Edge -> Svg msg
-        renderEdge {startX, startY, endX, endY, throughput} =
+        renderEdge edge =
             let
+                {from, to, startX, startY, endX, endY, throughput} = edge
                 startControlX = toString <| (2 * startX + endX) / 3
                 endControlX = toString <| (startX + 2 * endX) / 3
                 startLowerY = toString <| startY + throughput
@@ -397,8 +412,8 @@ render opts {nodes, edges} =
                 endY_ = toString endY
             in
                 Svg.path
-                    [ Attr.fill "black"
-                    , Attr.opacity "0.30"
+                    [ Attr.fill <| opts.edgeColor edge
+                    , Attr.opacity "0.3"
                     , Attr.d <| String.join " " [ "M", startX_, startY_
                                                 , "C", startControlX, startY_
                                                 , endControlX, endY_
@@ -407,7 +422,7 @@ render opts {nodes, edges} =
                                                 , "C", endControlX, endLowerY
                                                 , startControlX, startLowerY
                                                 , startX_, startLowerY ]]
-                    []
+                    [ Svg.title [] [Svg.text <| opts.edgeTitle edge]]
     in
         Svg.svg
             [ Attr.width <| toString opts.svgWidth
