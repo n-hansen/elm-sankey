@@ -11,7 +11,10 @@ module Sankey exposing ( Options
                        , Node
                        , Diagram
                        , generateDiagram
-                       , render )
+                       , render
+                       , defaults )
+{-| TODO Documentation 😅 -}
+
 
 import Dict exposing (Dict)
 import Graph exposing (Graph, AcyclicGraph)
@@ -46,6 +49,7 @@ type alias Options =
     , nodeColor : Node -> String
     , nodeTitle : Node -> String
     , edgeColor : Edge -> String
+    , edgeOpacity : Edge -> Float
     , edgeTitle : Edge -> String }
 
 defaults : Options
@@ -64,6 +68,7 @@ defaults = { initializeX = (\x -> toFloat x * 50 )
            , nodeColor = toString >> Hashbow.hashbow
            , nodeTitle = (\_ -> "")
            , edgeColor = (\_ -> "black")
+           , edgeOpacity = (\_ -> 0.3)
            , edgeTitle = (.throughput >> toString)}
 
 -----------
@@ -89,7 +94,8 @@ type alias Edge =
 
 type alias Diagram =
     { nodes : List Node
-    , edges : List Edge }
+    , edges : List Edge
+    , viewport : (Float,Float,Float,Float)}
 
 type alias Inputs a =
     { nodes : List (Graph.Node a)
@@ -116,6 +122,9 @@ fromContext f default nodeDict ctx =
     IntDict.get ctx.node.id nodeDict
         |> Maybe.map f
         |> withDefault default
+
+nodeBounds : Options -> Node -> (Float,Float,Float,Float)
+nodeBounds opts {x,y,throughput} = (x, y, x + opts.nodeWidth, y + throughput)
 
 nodeCenter : Node -> Float
 nodeCenter node = node.y + node.throughput / 2
@@ -342,7 +351,18 @@ outputDiagram opts layout =
                                           |> Tuple.first
                           in
                               State.finalState Dict.empty (traverseLayout updateEdges layout)
-                                  |> Dict.values})
+                                  |> Dict.values
+                      , viewport =
+                          case IntDict.values nodeDict of
+                              [] -> (0,0,0,0)
+                              node::rest -> List.foldl
+                                            (nodeBounds opts >>
+                                                 (\(minX1, minY1, maxX1, maxY1) (minX2, minY2, maxX2, maxY2) ->
+                                                      ( min minX1 minX2
+                                                      , min minY1 minY2
+                                                      , max maxX1 maxX2
+                                                      , max maxY1 maxY2 )))
+                                            (nodeBounds opts node) rest })
 
 
 generateDiagram : Options -> Inputs a -> Diagram
@@ -361,26 +381,16 @@ generateDiagram opts inputs =
 render : Options
        -> Diagram
        -> Html msg
-render opts {nodes, edges} =
+render opts {nodes, edges, viewport} =
     let
-        nodeBounds {x,y,throughput} = (x, y, x + opts.nodeWidth, y + throughput)
 
-        (minX,minY,maxX,maxY) =
-            case nodes of
-                [] -> (0,0,0,0)
-                node::rest -> List.foldl
-                              (nodeBounds >> (\(minX1, minY1, maxX1, maxY1) (minX2, minY2, maxX2, maxY2) ->
-                                                  ( min minX1 minX2
-                                                  , min minY1 minY2
-                                                  , max maxX1 maxX2
-                                                  , max maxY1 maxY2 )))
-                              (nodeBounds node) rest
+        (minX,minY,maxX,maxY) = viewport
 
         renderNode : Node -> Svg msg
         renderNode node =
             let
                 {id, x, y, throughput} = node
-                (nodeMinX,nodeMinY,nodeMaxX,nodeMaxY) = nodeBounds node
+                (nodeMinX,nodeMinY,nodeMaxX,nodeMaxY) = nodeBounds opts node
             in
                 Svg.g []
                     [ Svg.rect
@@ -420,7 +430,7 @@ render opts {nodes, edges} =
             in
                 Svg.path
                     [ Attr.fill <| opts.edgeColor edge
-                    , Attr.opacity "0.3"
+                    , Attr.opacity << toString <| opts.edgeOpacity edge
                     , Attr.d <| String.join " " [ "M", startX_, startY_
                                                 , "C", startControlX, startY_
                                                 , endControlX, endY_
